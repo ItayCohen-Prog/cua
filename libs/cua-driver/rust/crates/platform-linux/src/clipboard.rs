@@ -45,6 +45,26 @@ fn absolute_existing_file(path: &str) -> Result<String, String> {
 
 impl ClipboardBackend for LinuxClipboard {
     fn available_formats(&self) -> Result<Vec<String>, String> {
+        // A fresh private X11 display has no clipboard owner. clipboard-rs
+        // otherwise queries property atom 0 and reports BadAtom instead of empty.
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        if let Ok((conn, _)) = x11rb::connect(None) {
+            let selection = conn
+                .intern_atom(false, b"CLIPBOARD")
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?
+                .atom;
+            let owner = conn
+                .get_selection_owner(selection)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?
+                .owner;
+            if owner == x11rb::NONE {
+                return Ok(Vec::new());
+            }
+        }
         self.context()?
             .available_formats()
             .map_err(|e| e.to_string())

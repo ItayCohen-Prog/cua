@@ -1,3 +1,5 @@
+> **Omarchy background-desktop fork.** This fork adds dynamically allocated, task-owned desktops for Codex on Hyprland, with private input and automatic cleanup. [Implementation, setup, rationale, and limits](libs/cua-driver/tools/omarchy-background/README.md). Experimental; see the linked validation record.
+
 <div align="center">
   <a href="https://cua.ai" target="_blank" rel="noopener noreferrer">
     <picture>

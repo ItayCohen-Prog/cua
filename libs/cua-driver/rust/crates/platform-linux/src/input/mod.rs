@@ -276,6 +276,15 @@ fn x_server_vendor(display: *mut x11::xlib::Display) -> String {
 }
 
 fn supports_parallel_pointer_injection(display: *mut x11::xlib::Display) -> Result<()> {
+    let mut opcode = 0;
+    let mut event = 0;
+    let mut error = 0;
+    let xwayland_extension = unsafe {
+        x11::xlib::XQueryExtension(display, c"XWAYLAND".as_ptr(), &mut opcode, &mut event, &mut error) != 0
+    };
+    if xwayland_extension || x_server_exe_name().as_deref() == Some("Xwayland") {
+        bail!("MPX/uinput is unavailable on XWayland: virtual devices reach the compositor's shared input seat");
+    }
     let vendor = x_server_vendor(display);
     if vendor.to_ascii_lowercase().contains("tigervnc") {
         bail!(
@@ -471,11 +480,23 @@ fn uinput_accessible() -> bool {
         .is_ok()
 }
 
+fn wayland_uinput_is_unsafe(session_type: Option<&str>, wayland_display: Option<&str>) -> bool {
+    session_type.is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
+        || nonempty(wayland_display)
+}
+
+fn unsafe_uinput_session_from_env() -> bool {
+    wayland_uinput_is_unsafe(
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+    ) || kde_x11_uinput_hotplug_is_unsafe_from_env()
+}
+
 pub fn real_pointer_input_available() -> bool {
     // Do not even probe /dev/uinput on an affected KDE/X11 session. Creating
     // the device is itself the dangerous operation; a later fallback is too
     // late once Xorg has announced the hotplug to Qt clients.
-    if kde_x11_uinput_hotplug_is_unsafe_from_env() {
+    if unsafe_uinput_session_from_env() {
         return false;
     }
 
@@ -501,7 +522,7 @@ pub fn real_pointer_input_available() -> bool {
 }
 
 fn ensure_master_pointer(cursor_id: &str) -> Result<MasterPointerIds> {
-    ensure_master_pointer_for_session(cursor_id, kde_x11_uinput_hotplug_is_unsafe_from_env())
+    ensure_master_pointer_for_session(cursor_id, unsafe_uinput_session_from_env())
 }
 
 fn ensure_master_pointer_for_session(
@@ -510,7 +531,7 @@ fn ensure_master_pointer_for_session(
 ) -> Result<MasterPointerIds> {
     if unsafe_hotplug_session {
         return Err(uinput_unavailable(
-            "disabled on KDE Plasma X11; retry with delivery_mode='foreground'",
+            "disabled on Wayland/XWayland and KDE Plasma X11; retry with delivery_mode='foreground'",
         ));
     }
 
@@ -648,6 +669,9 @@ pub fn forget_master_pointer(cursor_id: &str) {
 }
 
 fn create_uinput_pointer(name: &str) -> Result<VirtualDevice> {
+    if unsafe_uinput_session_from_env() {
+        return Err(uinput_unavailable("virtual pointer creation is disabled in this desktop session"));
+    }
     guarded_uinput_creation(name, |name| {
         let mut keys = AttributeSet::<Key>::new();
         keys.insert(Key::BTN_LEFT);
@@ -2169,7 +2193,7 @@ pub fn send_type_text_with_delay(xid: u64, text: &str, inter_char_ms: u64) -> Re
 pub fn send_type_text_xtest(text: &str) -> Result<()> {
     use x11rb::protocol::xtest::ConnectionExt as _;
     let (conn, _) = connect_x11_for_input()?;
-    let mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+    let mut mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
     // Shift keycode (modifier index 0) for shifted characters.
     let modmap = conn.get_modifier_mapping()?.reply()?;
     let kpm = modmap.keycodes_per_modifier() as usize;
@@ -2178,15 +2202,25 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
         .get(..kpm)
         .and_then(|s| s.iter().copied().find(|&k| k != 0))
         .unwrap_or(50);
+    // Keep a distinct spare keycode for each missing symbol until the complete
+    // string has been delivered. Rebinding one keycode per character races Qt's
+    // asynchronous keyboard-map refresh and can repeat the last mapped symbol.
+    let mut guards = Vec::new();
+    let mut sequence = Vec::new();
     for ch in text.chars() {
-        let cp = match ch {
-            '\n' => 0xff0d, // XK_Return
-            '\t' => 0xff09, // XK_Tab
-            c => c as u32,
+        let cp = text_char_keysym(ch);
+        let (keycode, needs_shift, guard) = match char_to_keycode_shift(&mapping, cp) {
+            Some((keycode, shift)) => (keycode, shift, None),
+            None => {
+                let (keycode, guard) = keycode_for_keysym(&conn, &mapping, cp, &ch.to_string())?;
+                mapping = conn.get_keyboard_mapping(8, 248)?.reply()?;
+                (keycode, false, guard)
+            }
         };
-        let Some((keycode, needs_shift)) = char_to_keycode_shift(&mapping, cp) else {
-            continue;
-        };
+        if let Some(guard) = guard { guards.push(guard); }
+        sequence.push((keycode, needs_shift));
+    }
+    for (keycode, needs_shift) in sequence {
         if needs_shift {
             conn.xtest_fake_input(KEY_PRESS_EVENT, shift_kc, 0, x11rb::NONE, 0, 0, 0)?;
         }
@@ -2202,7 +2236,17 @@ pub fn send_type_text_xtest(text: &str) -> Result<()> {
     // this short-lived connection drops (see send_key_xtest — keyboard XTEST
     // events queued on a connection that closes immediately can be lost).
     let _ = conn.get_input_focus()?.reply();
+    drop(guards);
     Ok(())
+}
+
+fn text_char_keysym(ch: char) -> u32 {
+    match ch {
+        '\n' => 0xff0d,
+        '\t' => 0xff09,
+        c if u32::from(c) <= 0xff => u32::from(c),
+        c => 0x0100_0000 | u32::from(c),
+    }
 }
 
 /// Press a named key (with optional modifiers) into whatever window holds X
@@ -2906,6 +2950,25 @@ exit 0"#,
 
 #[cfg(test)]
 mod path_tests {
+    #[test]
+    fn unicode_text_uses_x11_unicode_keysyms() {
+        use super::text_char_keysym;
+        assert_eq!(text_char_keysym('A'), 0x41);
+        assert_eq!(text_char_keysym('é'), 0xe9);
+        assert_eq!(text_char_keysym('ש'), 0x0100_05e9);
+        assert_eq!(text_char_keysym('✓'), 0x0100_2713);
+        assert_eq!(text_char_keysym('\n'), 0xff0d);
+    }
+    #[test]
+    fn wayland_never_hotplugs_a_shared_seat_pointer() {
+        use super::wayland_uinput_is_unsafe;
+        assert!(wayland_uinput_is_unsafe(Some("wayland"), None));
+        assert!(wayland_uinput_is_unsafe(None, Some("wayland-1")));
+        assert!(wayland_uinput_is_unsafe(Some("x11"), Some("wayland-1")));
+        assert!(!wayland_uinput_is_unsafe(Some("x11"), None));
+        assert!(!wayland_uinput_is_unsafe(None, Some("")));
+    }
+
     use super::{
         create_uinput_pointer, ensure_master_pointer_for_session, guarded_uinput_creation,
         is_uinput_unavailable, kde_x11_uinput_hotplug_is_unsafe, master_pointer_name,

@@ -1,0 +1,37 @@
+{
+  "date": "2026-09-05",
+  "control_matrix": {
+    "passed": true,
+    "host_samples": 305,
+    "agent_window_focus_events": 0,
+    "distinct_user_focus_targets": 1,
+    "distinct_visible_workspace_sets": 1,
+    "cursor_positions": 10,
+    "checks": [
+      "two concurrent desktops",
+      "separate displays/workspaces",
+      "window activation",
+      "nine input actions",
+      "Hebrew Unicode",
+      "same-session and cross-session input isolation",
+      "fresh capture",
+      "desktop capture",
+      "private clipboard",
+      "hover",
+      "persistent press/move/release",
+      "failed launch",
+      "idempotent stop",
+      "output preservation",
+      "EOF cleanup",
+      "SIGKILL guardian cleanup"
+    ]
+  },
+  "installed_smoke": {
+    "installed_mcp": true,
+    "tmp_output_mount": true,
+    "qt_click": true,
+    "output_preserved_after_stop": true,
+    "worker_crash_cleanup": true,
+    "same_mcp_restart": true
+  }
+}

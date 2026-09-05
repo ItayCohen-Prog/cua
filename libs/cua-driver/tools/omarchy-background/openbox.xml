@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse><raiseOnFocus>yes</raiseOnFocus></focus>
+  <placement><policy>Smart</policy></placement>
+  <desktops><number>1</number></desktops>
+  <theme><name>Clearlooks</name></theme>
+  <applications><application class="*"><decor>no</decor></application></applications>
+</openbox_config>

@@ -3437,6 +3437,32 @@ impl Tool for TypeTextTool {
             };
         }
 
+        // Explicit foreground typing must reach the focused widget as real
+        // keyboard input. AT-SPI InsertText length handling differs between
+        // GTK and Qt; a successful accessibility call can still corrupt Unicode.
+        // Element-addressed operations were handled above and retain AX semantics.
+        if delivery.is_foreground() {
+            let text_f = text.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::input::with_x11_foreground(xid, 80, || {
+                    crate::input::send_type_text_xtest(&text_f)
+                })
+            })
+            .await;
+            return match result {
+                Ok(Ok(())) => ToolResult::text(format!(
+                    "Typed {text_len} character(s) through foreground XTEST."
+                ))
+                .with_structured(type_text_structured(
+                    "key_events_fg",
+                    text_len,
+                    false,
+                )),
+                Ok(Err(e)) => ToolResult::error(e.to_string()),
+                Err(e) => ToolResult::error(format!("Task error: {e}")),
+            };
+        }
+
         // Prefer the focused widget — the element the user just clicked. If a
         // NON-editable input holds keyboard focus (a spreadsheet cell, a
         // terminal, a canvas), the focus-free AT-SPI editable search below would
