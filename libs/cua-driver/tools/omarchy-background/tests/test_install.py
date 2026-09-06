@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ class Installation(unittest.TestCase):
                 if args[:3]==['codex','mcp','remove']:servers.pop(args[3],None)
                 return ''
             with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {'XDG_RUNTIME_DIR':str(root/'runtime-state')}))
                 for name,value in [('DEST',dest),('CODEX',codex),('CONFIG',config),('SKILL',codex/'skills/background-desktop')]:
                     stack.enter_context(patch.object(install,name,value))
                 stack.enter_context(patch.object(install,'servers',side_effect=lambda:servers))
@@ -32,6 +34,12 @@ class Installation(unittest.TestCase):
                 with patch.object(sys,'argv',['install.py','--driver',str(driver)]):install.main()
                 self.assertIn('background-desktop',servers);self.assertNotIn('cua-driver',servers)
                 self.assertTrue(install.SKILL.is_symlink())
+                # Updating a Python-only runtime reuses its verified private bundle.
+                bundle=dest/'dependencies/usr';bundle.mkdir(parents=True)
+                (bundle/'fixture').write_text('existing dependency')
+                with patch.object(sys,'argv',['install.py','--driver',str(driver)]):install.main()
+                self.assertEqual((bundle/'fixture').read_text(),'existing dependency')
+                self.assertIn('--dependency-root',servers['background-desktop']['args'])
                 with patch.object(sys,'argv',['install.py','--uninstall']):install.main()
                 self.assertEqual(config.read_text(),original)
                 self.assertEqual(servers['cua-driver'],prior)

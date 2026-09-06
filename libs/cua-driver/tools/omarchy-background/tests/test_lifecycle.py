@@ -36,17 +36,17 @@ class Lifecycle(unittest.TestCase):
             bg.terminate({'pid':1234,'stamp':'old'})
             kill.assert_not_called()
 
-    def test_foreign_window_or_visible_workspace_stops_input(self):
+    def test_observing_or_sharing_workspace_does_not_stop_private_input(self):
         s=object.__new__(bg.Session)
-        s.address='owned';s.lease={'workspace':4}
+        s.address='owned';s.lease={'workspace':4};s.mode='agent'
         class Process:
             def poll(self):return None
         s.p=Process();s.owns_pid=lambda _:True;s.check_properties=lambda:None
         own={'address':'owned','pid':1,'workspace':{'id':4}}
         user={'address':'user','pid':2,'workspace':{'id':4}}
         with patch.object(bg,'hypr',side_effect=lambda name:[own,user] if name=='clients' else []):
-            with self.assertRaisesRegex(RuntimeError,'user window'):s.validate()
+            s.validate()
         with patch.object(bg,'hypr',side_effect=lambda name:[own] if name=='clients' else [{'activeWorkspace':{'id':4}}]):
-            with self.assertRaisesRegex(RuntimeError,'visible'):s.validate()
+            s.validate()
 
 if __name__=='__main__':unittest.main()

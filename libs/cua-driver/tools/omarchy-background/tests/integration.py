@@ -110,7 +110,7 @@ def main():
                 p=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                 rpc=RPC(p)
                 rpc.call('initialize',{})
-                check(rpc.call('tools/call',{'name':'desktop_start','arguments':{'output_dir':str(output)}}))
+                check(rpc.call('tools/call',{'name':'desktop_start','arguments':{'output_dir':str(output),'lifetime':'disposable'}}))
                 response=rpc.call('tools/call',{'name':'desktop_status','arguments':{}})
                 status=json.loads(response['content'][0]['text'])
                 owned_windows.add(status['window'])

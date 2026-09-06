@@ -97,7 +97,9 @@ def main():
     if not args.driver or not args.driver.is_file():raise RuntimeError('--driver must point to the driver built from this fork')
     for binary in ('bwrap','Xwayland','xauth','xprop','dbus-daemon','hyprctl','codex'):
         if not shutil.which(binary):raise RuntimeError(f'Missing prerequisite: {binary}')
-    if not args.private_openbox and not shutil.which('openbox'):
+    reuse_dependencies = (DEST/'dependencies/usr').is_dir() and (DEST/'installation.json').exists()
+    use_private = args.private_openbox or reuse_dependencies
+    if not use_private and not shutil.which('openbox'):
         raise RuntimeError('Install Openbox using Omarchy package management, or pass --private-openbox')
     if SKILL.exists() and not (SKILL.is_symlink() and SKILL.resolve()==DEST/'skill/background-desktop'):
         raise RuntimeError('A different background-desktop skill exists; refusing to overwrite it')
@@ -110,15 +112,17 @@ def main():
     DEST.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='cua-install-',dir=DEST.parent) as tmp:
         stage=Path(tmp)/'new';stage.mkdir()
-        for name in ('background.py','private_pointer.py','hyprland.lua','openbox.xml'):
+        for name in ('background.py','supervisor.py','input_gate.py','private_pointer.py','hyprland.lua','openbox.xml'):
             shutil.copy2(HERE/name,stage/name)
         shutil.copytree(HERE/'skill',stage/'skill')
         shutil.copy2(args.driver,stage/'cua-driver')
         if args.private_openbox:
             (stage/'dependencies').mkdir()
             private_openbox(stage/'dependencies')
+        elif reuse_dependencies:
+            shutil.copytree(DEST/'dependencies',stage/'dependencies')
         mcp={'command':sys.executable,'args':[str(DEST/'background.py'),'mcp','--driver',str(DEST/'cua-driver')]}
-        if args.private_openbox:mcp['args']+=['--dependency-root',str(DEST/'dependencies')]
+        if use_private:mcp['args']+=['--dependency-root',str(DEST/'dependencies')]
         record={'mcp':mcp,'previous_cua':prior.get('previous_cua',servers().get('cua-driver')),
                 'driver_sha256':hashlib.sha256((stage/'cua-driver').read_bytes()).hexdigest()}
         (stage/'installation.json').write_text(json.dumps(record,indent=2));(stage/'installation.json').chmod(0o600)
