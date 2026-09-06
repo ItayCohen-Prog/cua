@@ -42,3 +42,22 @@ python tests/installed_smoke.py
 For the private dependency bundle, add `--dependency-root "$HOME/.local/share/cua-background/dependencies"` to the integration command. Qt5 development files and `g++` are needed only for these GUI fixtures. The installed smoke reads the installation manifest and uses its actual command.
 
 The full upstream macOS/Windows/Linux desktop certification matrix was **not run**. This is a tested Omarchy-specific fork, not a claim of upstream release certification or compatibility with other compositors, GPUs, or native Wayland-only applications.
+
+
+## Observation and review lifecycle, 2026-09-06
+
+The Python-only change keeps the installed Rust driver unchanged. The updated native Qt control matrix passed all existing input/capture/isolation checks, with 307 host samples, one user focus target, one visible workspace set, and no agent-window focus events. Disposable EOF and killed-client cleanup still passed.
+
+`tests/review_integration.py` passed against Hyprland 0.56.2:
+
+- Private Xwayland physical devices disabled in agent mode, XTEST devices enabled; user handoff restores physical devices. The installed smoke also passed real Qt input, worker-crash cleanup, /tmp output preservation, and same-client restart.
+- A real Qt click succeeds with a mocked visible-workspace snapshot. No host workspace was switched for the test. This is not a claim of a human observation test.
+- User mode allows captures and rejects mutations; resuming agent mode restores input.
+- An open app survives MCP EOF, MCP SIGKILL, and explicit finish. A new client can reconnect; attach alone does not grant input.
+- Closing the last native app reclaims the supervisor, worker, and runtime directory; explicit stop also reclaims them.
+- Host focus, visible workspaces, and cursor position were unchanged across this run.
+
+Run `python tests/review_integration.py` from this directory with the installed driver/dependency bundle. It builds a Qt test fixture inside a temporary output directory and removes it after verified cleanup. Existing Rust/macOS/Windows paths were not modified or recertified. A real human watching and interacting after handoff remains a separate acceptance check.
+
+
+Completion policy follow-up: `desktop_finish` now requires both `keep_open` and a nonempty task-specific `reason`. Eight unit/contract tests pass, including rejection of missing, string-valued, or unreasoned choices and acceptance of both keep and close decisions. The native review test verifies an omitted choice leaves the active app intact, followed by an explicit keep decision. Host focus/workspace snapshots are reported as observations, since the human may use the desktop during these lifecycle tests; input isolation remains covered by the existing control matrix.

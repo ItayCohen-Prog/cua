@@ -1,6 +1,6 @@
 # Background desktop tasks on Omarchy
 
-This fork adds task-owned background desktops to Cua Driver on Omarchy with Hyprland's Lua configuration. An agent reserves an unused workspace, launches apps in a private Xwayland display, controls them through Cua, exports its results, then closes the session. The user's active workspace, keyboard focus, pointer, and existing app instances stay separate.
+This fork adds task-owned background desktops to Cua Driver on Omarchy with Hyprland's Lua configuration. An agent reserves an unused workspace, launches apps in a private Xwayland display, controls them through Cua, exports its results, then leaves reviewable apps open for the user. The user's active workspace, keyboard focus, pointer, and existing app instances stay separate.
 
 This is an experimental Linux integration, tested on Omarchy with Hyprland 0.56.2, NVIDIA RTX 4070 Laptop graphics, and DaVinci Resolve 21.0.4. It is not an official Cua or Omarchy release. See [validation](VALIDATION.md) for the actual coverage and limits.
 
@@ -60,11 +60,29 @@ The installer refuses updates/uninstall while sessions are active. Uninstall rem
 
 Workspace allocation runs under an interprocess lock. It excludes occupied workspaces, the active workspace on every monitor even if empty, and other task reservations. Display numbers come from the reserved range 62001–62999.
 
-Each MCP process owns one session. The session tracks process IDs together with Linux start times, preventing a stale lease from killing a reused PID. A separate guardian watches the owning process through a pidfd. On normal stop, EOF, termination, or owner death, the task process group is stopped and the PID namespace removes remaining descendants. The lease, app profile, private clipboard, Xauthority cookie, sockets, logs, and temporary files are removed. Stale leases are recovered before subsequent allocation. An idle session expires after 15 minutes without desktop activity.
+Each desktop has an independent supervisor and Unix control socket. MCP clients attach to it; they do not own the app processes. The supervisor and worker still use PID start times and a pidfd guardian, so actual process failure cleans up verified owned resources without signalling a reused PID.
 
-Exports remain in the task output directory. Apps cannot write elsewhere on the host through normal filesystem paths; the existing filesystem is mounted read-only except the explicit output directory and private profile. Save or export before `desktop_stop`: an unsaved document or a project stored only in the temporary profile is discarded. For Resolve, export `.drp` projects as well as rendered media.
+`desktop_start` defaults to `lifetime="review"`. `desktop_finish` has no completion default. It requires an explicit `keep_open` boolean and a brief `reason` based on the user's request and next action. The agent decides whether the app is still useful for review or continued work, or whether closing it is appropriate after saving. Keeping it open hands control to the user; closing it releases the desktop. A separate recovery fallback hands open apps to the user if the agent unexpectedly disconnects, dies, or goes idle for 15 minutes. That fallback is not a normal completion decision. There is no idle expiry after handoff. Closing the last app or explicitly stopping the desktop releases its workspace, processes, profile, sockets, and logs. An empty desktop is not retained. For throwaway tests, `lifetime="disposable"` keeps the earlier EOF/death/idle cleanup behavior. `desktop_finish(keep_open=false)` and `desktop_stop` explicitly destroy the desktop.
 
-Before each operation the manager verifies that it still owns the window, that the no-focus/rendering protections remain active, that the workspace is off-screen, and that no user window has entered it. If the user visits or reuses the workspace, operations pause. An already-dispatched operation may finish; the manager never switches the user away or moves their windows.
+Exports remain in the task output directory. Session profiles remain available during review but are removed when the desktop is closed. Save/export important work there, including a Resolve `.drp` and its media; a retained app is not a permanent backup. The filesystem mounts and private sockets are unchanged.
+
+### Watching and taking control
+
+You can visit the reserved workspace while the agent works. Visibility and other windows on that workspace no longer pause private input. In agent mode, XI2 disables the private Xwayland keyboard, pointer, relative-pointer, and gesture devices. XTEST and master devices stay enabled for Cua. The gate verifies device state before driver operations and rejects unknown slave devices. It never opens the host X display or physical device nodes.
+
+`desktop_control(mode="user")` restores the private physical devices and makes the owned desktop focusable when you click it. Captures still work, but agent edits, keys, mouse input, clipboard writes, and launches are rejected. `mode="agent"` suppresses physical input before resuming automation. Neither transition focuses a window or switches a host workspace. The Hyprland override uses `hl.dsp.window.set_prop` with the verified owned address and readback; this build's legacy `hyprctl setprop` returns `unknown request` despite advertising command help.
+
+`desktop_sessions` lists retained desktops. `desktop_attach(session_id=...)` reconnects to one without changing control mode; another live agent cannot take over an attached desktop. The user can ask the agent to hand over or resume control.
+
+For retained desktops, a terminal also supports:
+
+```bash
+python ~/.local/share/cua-background/supervisor.py list
+python ~/.local/share/cua-background/supervisor.py status SESSION_ID
+python ~/.local/share/cua-background/supervisor.py stop SESSION_ID
+```
+
+Update the integration with the usual installer command. It reuses an existing private dependency bundle, so Python-only updates do not download or replace system packages. `--private-openbox` explicitly refreshes that bundle.
 
 ## Limits
 
@@ -72,7 +90,7 @@ Before each operation the manager verifies that it still owns the window, that t
 - Existing host app instances cannot migrate between displays. Launch a new instance and open/import the required files. An app with a system-wide singleton or unusual licensing may need separate support.
 - Apps must support X11. Qt, GTK, and supported browser backends can run through Xwayland. Native Wayland-only apps are outside this implementation.
 - Host audio, clipboard, desktop portals, keyrings, and notifications are not bridged. The private clipboard works between apps within a task. Screenshot and visual controls remain available when an app exposes little accessibility information.
-- Automated skill selection is a model capability, not an OS guarantee. The runtime guarantees the session behavior when called. The agent still needs to choose the tool, inspect results, export outputs, and stop the session.
+- Automated skill selection is a model capability, not an OS guarantee. The runtime guarantees the session behavior when called. The agent still needs to choose the tool, inspect results, export outputs, and choose whether the user needs the app left open.
 - Rootful Xwayland and Hyprland Lua behavior are version-sensitive. Other compositor versions and GPU drivers need their own validation. The default private desktop size is 1800 × 1000.
 
 ## Sources and alternatives

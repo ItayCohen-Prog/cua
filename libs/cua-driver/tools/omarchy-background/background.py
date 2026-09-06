@@ -18,6 +18,8 @@ import time
 HERE = Path(__file__).resolve().parent
 STATE = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'cua-background'
 IDLE_SECONDS = 900
+READ_ONLY = {'list_apps', 'list_windows', 'get_window_state', 'get_desktop_state',
+             'get_accessibility_tree', 'verify_state', 'get_screen_size', 'get_cursor_position'}
 ALLOWED = {
     'list_apps', 'list_windows', 'get_window_state', 'get_desktop_state',
     'get_accessibility_tree', 'verify_state', 'bring_to_front', 'set_window_frame',
@@ -195,6 +197,7 @@ class Session:
         self.directory = None
         self.p = self.guard = self.log = None
         self.address = None
+        self.mode = 'agent'
         self.driver = str(Path(driver).resolve(strict=True))
         output = Path(output_dir)
         if not output.is_absolute() or not output.is_dir():
@@ -300,7 +303,8 @@ class Session:
     def check_properties(self):
         for prop in ('no_focus', 'render_unfocused'):
             value = run(['hyprctl', 'getprop', 'address:'+self.address, prop])
-            if value not in ('1', 'true'):
+            expected = ('0', 'false') if prop == 'no_focus' and self.mode == 'user' else ('1', 'true')
+            if value not in expected:
                 raise RuntimeError(f'Protection missing: {prop}={value}; install the Hyprland rule')
 
     def validate(self):
@@ -311,18 +315,13 @@ class Session:
             raise RuntimeError('Owned desktop window is gone')
         if windows[0]['workspace']['id'] != self.lease['workspace']:
             raise RuntimeError('Desktop moved out of its reserved workspace; stopping input')
-        # If the user enters the workspace, pause instead of manipulating what they see.
-        if any(m['activeWorkspace']['id'] == self.lease['workspace'] for m in hypr('monitors')):
-            raise RuntimeError('Reserved workspace is now visible; input is paused')
-        others = [w for w in hypr('clients') if w['workspace']['id'] == self.lease['workspace']
-                  and w['address'] != self.address]
-        if others:
-            raise RuntimeError('Reserved workspace contains a user window; input is paused')
         self.check_properties()
         self.last_used = time.monotonic()
 
     def call(self, name, args):
         self.validate()
+        if self.mode == 'user' and name not in READ_ONLY:
+            raise RuntimeError('User has control; explicitly resume agent control before sending input')
         if name not in ALLOWED:
             raise ValueError('Tool is outside the isolated desktop API')
         try:
@@ -334,12 +333,30 @@ class Session:
 
     def launch(self, argv):
         self.validate()
+        if self.mode != 'agent':
+            raise RuntimeError('User has control; resume agent control before launching apps')
         return self.rpc.call('launch', {'argv': argv})
+
+    def control(self, mode):
+        if mode not in ('agent', 'user'):
+            raise ValueError('mode must be agent or user')
+        self.validate()
+        # Stop mutations first. Suppress physical input before granting agent control.
+        self.mode = 'user'
+        self.rpc.call('input_mode', {'agent': mode == 'agent'})
+        value = '1' if mode == 'agent' else '0'
+        reply = run(['hyprctl', 'dispatch', 'hl.dsp.window.set_prop({window="address:'+self.address+'",prop="no_focus",value="'+value+'"})'])
+        if reply != 'ok':
+            raise RuntimeError('Cannot change owned window control: '+reply)
+        self.mode = mode
+        self.check_properties()
+        return self.status()
 
     def status(self):
         return {'active': self.p is not None and self.p.poll() is None,
                 'workspace': self.lease['workspace'], 'display': self.lease['display'],
-                'output_dir': str(self.output), 'idle_timeout_seconds': IDLE_SECONDS,
+                'output_dir': str(self.output), 'control': self.mode,
+                'observation_allowed': True, 'idle_timeout_seconds': IDLE_SECONDS,
                 'session_dir': str(self.directory), 'window': self.address}
 
     def close(self):
@@ -373,7 +390,7 @@ def worker(directory, driver):
     os.environ['XAUTHORITY'] = str(auth)
     os.environ.pop('WAYLAND_DISPLAY', None)
     children = []
-    pointer = None
+    pointer = gate = None
     try:
         xserver = subprocess.Popen(['Xwayland', os.environ['DISPLAY'], '-geometry', '1800x1000',
                                     '-nolisten', 'tcp', '-noreset', '-nokeymap', '-auth', str(auth)],
@@ -401,6 +418,8 @@ def worker(directory, driver):
             time.sleep(.1)
         else:
             raise RuntimeError('Private window manager unavailable')
+        from input_gate import InputGate
+        gate = InputGate()
         # Initialize only this display's XTEST pointer before the first click.
         xlib = ctypes.CDLL('libX11.so.6')
         xtst = ctypes.CDLL('libXtst.so.6')
@@ -448,6 +467,15 @@ def worker(directory, driver):
         def dispatch(method, params):
             if method == 'ready':
                 return {'ready': True}
+            if method == 'input_mode':
+                if pointer.held:
+                    pointer.call('mouse_button_up', {})
+                return gate.apply(params['agent'])
+            if method == 'has_windows':
+                result = rpc.call('tools/call', {'name':'list_windows','arguments':{}})
+                if result.get('isError'):
+                    raise RuntimeError('Cannot inspect open apps')
+                return bool(result['structuredContent']['windows'])
             if method == 'schemas':
                 return list(schemas.values())
             if method == 'launch':
@@ -461,7 +489,10 @@ def worker(directory, driver):
                     raise RuntimeError(f'Application exited with code {child.returncode}')
                 return {'pid':child.pid, 'display':os.environ['DISPLAY']}
             if method == 'driver':
+                gate.apply(gate.agent)
                 name, args = params['name'], dict(params['arguments'])
+                if not gate.agent and name not in READ_ONLY:
+                    raise RuntimeError('User has control')
                 if name not in schemas:
                     raise ValueError('Unsupported desktop tool')
                 if name in NAMES:
@@ -480,6 +511,8 @@ def worker(directory, driver):
         if pointer:
             with contextlib.suppress(Exception):
                 pointer.close()
+        if gate:
+            gate.close()
         for child in reversed(children):
             if child.poll() is None:
                 child.terminate()
@@ -504,28 +537,33 @@ def tool(name, description, properties=None, required=None):
 
 
 TOOLS = [
-    tool('desktop_start', 'Reserve an unused Hyprland workspace and start a private desktop for this task. Save deliverables in output_dir; profiles are temporary. No host focus or cursor input.',
-         {'output_dir':{'type':'string','description':'Existing absolute task output directory'}}, ['output_dir']),
-    tool('desktop_launch', 'Launch an installed app inside the task desktop. Never use a host launcher. argv is executable plus arguments, without shell expansion.',
+    tool('desktop_start', 'Start an observable private desktop. Review lifetime keeps open apps after disconnect or task completion; disposable lifetime cleans up automatically.',
+         {'output_dir':{'type':'string'}, 'lifetime':{'type':'string','enum':['review','disposable'],'default':'review'}}, ['output_dir']),
+    tool('desktop_launch', 'Launch an installed app inside the private desktop, without host focus changes.',
          {'argv':{'type':'array','items':{'type':'string'},'minItems':1}}, ['argv']),
-    tool('desktop_tools', 'Return Cua control/capture tool schemas for the private desktop.'),
-    tool('desktop_call', 'Call a Cua tool inside the private desktop. Use desktop_tools to inspect arguments, then list_windows and get_window_state. Window coordinates are client-local. Input focus is confined to this desktop.',
+    tool('desktop_tools', 'Return Cua schemas for the private desktop.'),
+    tool('desktop_call', 'Call a private Cua tool. Watching never pauses it; user control blocks mutations.',
          {'name':{'type':'string'},'arguments':{'type':'object'}}, ['name','arguments']),
-    tool('desktop_status', 'Inspect this task desktop and its resource ownership.'),
-    tool('desktop_stop', 'Close all task-owned apps, remove temporary profiles/screenshots/sockets and release the workspace. Save/export results to output_dir first. Idempotent.'),
+    tool('desktop_status', 'Inspect the attached session, ownership, and control mode.'),
+    tool('desktop_sessions', 'List existing desktops, including apps retained for review.'),
+    tool('desktop_attach', 'Attach to a retained desktop by session_id without changing its control mode.',
+         {'session_id':{'type':'string'}}, ['session_id']),
+    tool('desktop_control', 'Pass control to the user, or resume agent input after the user requests it. Never switches workspace or focuses the host window.',
+         {'mode':{'type':'string','enum':['agent','user']}}, ['mode']),
+    tool('desktop_finish', 'Finish with an explicit task-based decision: leave apps open for the user or close them after saving. Supply a brief concrete reason; there is no completion default.',
+         {'keep_open':{'type':'boolean'}, 'reason':{'type':'string','minLength':1}}, ['keep_open','reason']),
+    tool('desktop_stop', 'Explicitly close this desktop and all its apps. Unsaved state is discarded. Use finish to retain work for review.'),
 ]
 
 
 def mcp(driver, dependency_root):
-    session = None
+    from supervisor import Client, sessions
+    client = None
     def dispatch(method, params):
-        nonlocal session
-        if session and (session.directory is None or session.p.poll() is not None):
-            session.close()
-            session = None
+        nonlocal client
         if method == 'initialize':
             return {'protocolVersion':'2025-06-18','capabilities':{'tools':{}},
-                    'serverInfo':{'name':'omarchy-background','version':'0.1.0'}}
+                    'serverInfo':{'name':'omarchy-background','version':'0.2.0'}}
         if method == 'ping':
             return {}
         if method == 'tools/list':
@@ -535,26 +573,36 @@ def mcp(driver, dependency_root):
         name, args = params['name'], params.get('arguments',{})
         try:
             if name == 'desktop_start':
-                if session:
-                    raise RuntimeError('This task already owns a desktop; stop it before starting another')
-                session = Session(args['output_dir'],driver,dependency_root)
-                value = session.status()
-            elif name == 'desktop_stop':
-                if session:
-                    session.close()
-                    session = None
-                value = {'active':False,'cleaned':True}
+                if client and client.exists():
+                    raise RuntimeError('Already attached; finish or stop the desktop first')
+                client = Client.start(args['output_dir'], driver, dependency_root, args.get('lifetime','review'))
+                value = client.call('status')
+            elif name == 'desktop_sessions':
+                value = sessions()
+            elif name == 'desktop_attach':
+                if client and client.exists():
+                    raise RuntimeError('Already attached; finish first')
+                client = Client(args['session_id'])
+                value = client.call('attach')
             elif name == 'desktop_status':
-                value = session.status() if session else {'active':False}
+                value = client.call('status') if client and client.exists() else {'active':False}
+            elif name == 'desktop_stop':
+                value = client.call('stop') if client and client.exists() else {'active':False,'cleaned':True}
+                client = None
             else:
-                if not session:
-                    raise RuntimeError('Call desktop_start first')
+                if not client or not client.exists():
+                    raise RuntimeError('Start or attach to a desktop first')
                 if name == 'desktop_launch':
-                    value = session.launch(args['argv'])
+                    value = client.call('launch', args)
                 elif name == 'desktop_tools':
-                    value = session.rpc.call('schemas',{})
+                    value = client.call('schemas')
                 elif name == 'desktop_call':
-                    return session.call(args['name'],args['arguments'])
+                    return client.call('driver', args)
+                elif name == 'desktop_control':
+                    value = client.call('control', args)
+                elif name == 'desktop_finish':
+                    value = client.call('finish', args)
+                    client = None
                 else:
                     raise ValueError('Unknown desktop tool')
             return {'content':[{'type':'text','text':json.dumps(value)}]}
@@ -565,31 +613,11 @@ def mcp(driver, dependency_root):
     signal.signal(signal.SIGTERM,stopped)
     signal.signal(signal.SIGINT,stopped)
     try:
-        # Binary reads avoid TextIO buffering hiding a second queued MCP request.
-        buffer = b''
-        while True:
-            wait = max(0, IDLE_SECONDS-(time.monotonic()-session.last_used)) if session else None
-            if not select.select([sys.stdin],[],[],wait)[0]:
-                session.close()
-                session = None
-                continue
-            data = os.read(sys.stdin.fileno(),65536)
-            if not data:
-                break
-            buffer += data
-            while b'\n' in buffer:
-                line,buffer = buffer.split(b'\n',1)
-                request = json.loads(line)
-                if 'id' not in request:
-                    continue
-                try:
-                    result = {'result':dispatch(request['method'],request.get('params',{}))}
-                except Exception as exc:
-                    result = {'error':{'code':-32000,'message':str(exc)}}
-                print(json.dumps({'jsonrpc':'2.0','id':request['id'],**result}),flush=True)
+        serve(dispatch)
     finally:
-        if session:
-            session.close()
+        if client and client.exists():
+            with contextlib.suppress(Exception):
+                client.call('disconnect')
 
 
 if __name__ == '__main__':

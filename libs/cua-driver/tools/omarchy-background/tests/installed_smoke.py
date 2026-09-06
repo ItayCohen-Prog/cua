@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='cua-installed-') as tmp:
         def data(result):return json.loads(result['content'][0]['text'])
         try:
             rpc.call('initialize',{})
-            assert len(rpc.call('tools/list',{})['tools'])==6
+            assert len(rpc.call('tools/list',{})['tools'])>=10
             first=data(call('desktop_start',{'output_dir':str(output)}))
             call('desktop_launch',{'argv':[str(fixture),str(output/'state.json'),'Installed MCP fixture']})
             time.sleep(.5)
