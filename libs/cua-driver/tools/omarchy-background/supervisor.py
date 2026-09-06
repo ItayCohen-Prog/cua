@@ -15,6 +15,16 @@ import time
 from background import HERE, STATE, IDLE_SECONDS, Session, alive, identity, write_json
 
 
+def finish_decision(arguments):
+    """Require a deliberate completion choice before touching app lifetime."""
+    if type(arguments.get('keep_open')) is not bool:
+        raise ValueError('Choose keep_open=true or false from the task context; no completion default')
+    reason = arguments.get('reason')
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError('Explain briefly why leaving the apps open or closing them fits this task')
+    return {'keep_open': arguments['keep_open'], 'reason': reason.strip()}
+
+
 def directory_for(session_id):
     if not re.fullmatch(r'session-[0-9a-f]{24}', session_id):
         raise ValueError('Invalid session_id')
@@ -84,6 +94,7 @@ def supervise(args):
     launched = False
     launch_time = 0
     last_poll = 0
+    completion = None
     def stopped(_sig, _frame):
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stopped)
@@ -93,7 +104,7 @@ def supervise(args):
         directory = session.directory
         def status():
             value = {**session.status(), 'session_id':directory.name,
-                     'lifetime':args.lifetime, 'controller':controller,
+                     'lifetime':args.lifetime, 'controller':controller, 'completion_decision':completion,
                      'review_retained':controller is None and session.mode == 'user'}
             write_json(directory/'status.json', value)
             return value
@@ -108,7 +119,7 @@ def supervise(args):
             return {'active':False, 'cleaned':True}
 
         def dispatch(request):
-            nonlocal controller, launched, launch_time, closing
+            nonlocal controller, launched, launch_time, closing, completion
             method, params = request['method'], request.get('arguments', {})
             caller = request['controller']
             if method == 'status':
@@ -127,7 +138,8 @@ def supervise(args):
                 closing = True
                 return {'active':False, 'cleaned':True}
             if method == 'finish':
-                return release(params.get('keep_open', True))
+                completion = finish_decision(params)
+                return {**release(completion['keep_open']), 'completion_decision':completion}
             if method == 'disconnect':
                 return release(args.lifetime == 'review')
             if method == 'control':

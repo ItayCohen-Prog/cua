@@ -58,3 +58,6 @@ The Python-only change keeps the installed Rust driver unchanged. The updated na
 - Host focus, visible workspaces, and cursor position were unchanged across this run.
 
 Run `python tests/review_integration.py` from this directory with the installed driver/dependency bundle. It builds a Qt test fixture inside a temporary output directory and removes it after verified cleanup. Existing Rust/macOS/Windows paths were not modified or recertified. A real human watching and interacting after handoff remains a separate acceptance check.
+
+
+Completion policy follow-up: `desktop_finish` now requires both `keep_open` and a nonempty task-specific `reason`. Eight unit/contract tests pass, including rejection of missing, string-valued, or unreasoned choices and acceptance of both keep and close decisions. The native review test verifies an omitted choice leaves the active app intact, followed by an explicit keep decision. Host focus/workspace snapshots are reported as observations, since the human may use the desktop during these lifecycle tests; input isolation remains covered by the existing control matrix.

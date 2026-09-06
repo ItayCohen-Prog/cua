@@ -550,8 +550,8 @@ TOOLS = [
          {'session_id':{'type':'string'}}, ['session_id']),
     tool('desktop_control', 'Pass control to the user, or resume agent input after the user requests it. Never switches workspace or focuses the host window.',
          {'mode':{'type':'string','enum':['agent','user']}}, ['mode']),
-    tool('desktop_finish', 'Finish the task. Keep apps open and hand control to the user by default; keep_open=false closes disposable work after saving.',
-         {'keep_open':{'type':'boolean','default':True}}),
+    tool('desktop_finish', 'Finish with an explicit task-based decision: leave apps open for the user or close them after saving. Supply a brief concrete reason; there is no completion default.',
+         {'keep_open':{'type':'boolean'}, 'reason':{'type':'string','minLength':1}}, ['keep_open','reason']),
     tool('desktop_stop', 'Explicitly close this desktop and all its apps. Unsaved state is discarded. Use finish to retain work for review.'),
 ]
 
